@@ -15,6 +15,10 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+const (
+	roleMarker = "###"
+)
+
 var win *acme.Win
 var provider Provider
 var ctx context.Context
@@ -79,6 +83,7 @@ func main() {
 	win.Name("+%s", model)
 	win.Ctl("clean")
 	win.Fprintf("tag", "Get Stop ")
+	win.Write("data", []byte(roleMarker+"User\n"))
 
 	go chat()
 
@@ -125,14 +130,14 @@ func chat() {
 		//		text = strings.Replace(text, "\n", "\n\t", -1)
 
 		win.Addr("$")
-		win.Write("data", []byte("\n\n\t"))
+		win.Write("data", []byte("\n\n"+roleMarker+" Assistant\n"))
 		//		win.Write("data", []byte(text))
 
 	Read:
 		for {
 			select {
 			case <-needstop:
-				win.Write("data", []byte("<Stopped by user>"))
+				win.Write("data", []byte("<Stopped by user>\n"))
 				break Read
 			default:
 			}
@@ -140,7 +145,6 @@ func chat() {
 			buf := make([]byte, 1024)
 			n, err := stream.Read(buf)
 			if err == io.EOF {
-				win.Write("data", []byte("\n"))
 				break
 			}
 			if err != nil {
@@ -148,36 +152,45 @@ func chat() {
 				break
 			}
 
-			out := strings.Replace(string(buf[:n]), "\n", "\n\t", -1)
+			out := strings.Replace(string(buf[:n]), "\n", "\n", -1)
 			win.Write("data", []byte(out))
 		}
 		stream.Close()
-
-		win.Write("data", []byte("\n"))
+		win.Write("data", []byte("\n"+roleMarker+" User\n"))
 		win.Ctl("clean")
 	}
 }
 
 func readMessages() (messages []Message) {
 	data, _ := win.ReadAll("body")
-	// Segment body by indentation.
-	lines := strings.Split(string(data), "\n")
-	for _, line := range lines {
-		if len(line) == 0 {
+	text := string(data)
+
+	segments := strings.Split(text, roleMarker)
+	for _, segment := range segments {
+		segment = strings.TrimSpace(segment)
+		if segment == "" {
 			continue
 		}
-		role := "user"
-		if line[0] == '\t' {
-			role = "assistant"
-			line = line[1:]
+
+		lines := strings.SplitN(segment, "\n", 2)
+		role := strings.TrimSpace(lines[0])
+		content := strings.TrimSpace(lines[1])
+
+		switch role {
+		case "Assistant":
+			if content != "" {
+				messages = append(messages, Message{Role: "assistant", Content: content})
+			}
+		case "User":
+			if content != "" {
+				messages = append(messages, Message{Role: "user", Content: content})
+			}
+		default:
+			fmt.Fprintf(os.Stderr, "unknown role: %s\n", role)
+			if content != "" {
+				messages = append(messages, Message{Role: "user", Content: content})
+			}
 		}
-		if len(messages) == 0 || messages[len(messages)-1].Role != role {
-			messages = append(messages, Message{
-				Role: role,
-			})
-		}
-		m := &messages[len(messages)-1]
-		m.Content = join(m.Content, line, "\n")
 	}
 	return
 }
