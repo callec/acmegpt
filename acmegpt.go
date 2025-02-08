@@ -12,20 +12,29 @@ import (
 	"strings"
 
 	"9fans.net/go/acme"
-	openai "github.com/sashabaranov/go-openai"
 	"gopkg.in/yaml.v3"
 )
 
 var win *acme.Win
-var client *openai.Client
+var provider Provider
 var ctx context.Context
 var needchat = make(chan bool, 1)
 var needstop = make(chan bool, 1)
-var model = openai.GPT4o // openai.GPT3Dot5Turbo
+
+type Message struct {
+	Role    string
+	Content string
+}
 
 type config struct {
-	Key   string `yaml:"key"`
-	Model string `yaml:"model"`
+	Provider string `yaml:"provider"`
+	Key      string `yaml:"key"`
+	Model    string `yaml:"model"`
+}
+
+type Provider interface {
+	StreamChat(ctx context.Context, message []Message) (io.ReadCloser, error)
+	Close() error
 }
 
 func usage() {
@@ -39,7 +48,7 @@ func main() {
 	flag.Usage = usage
 	flag.Parse()
 
-	key := os.Getenv("OPENAI_API_KEY")
+	model := "acmegpt"
 
 	file := path.Join(os.Getenv("HOME"), ".acmegpt")
 	data, err := os.ReadFile(file)
@@ -48,22 +57,25 @@ func main() {
 		if err := yaml.Unmarshal(data, &conf); err != nil {
 			log.Fatalf("unmarshal %s: %v", file, err)
 		}
-		key = conf.Key
-		if conf.Model != "" {
-			model = conf.Model
+		if conf.Provider == "" {
+			log.Fatalf("provider missing in config")
+		}
+		model = conf.Provider
+		provider, err = NewProvider(conf)
+		if err != nil {
+			log.Fatal(err)
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
 		log.Fatal(err)
 	}
 
-	client = openai.NewClient(key)
 	ctx = context.Background()
 
 	win, err = acme.New()
 	if err != nil {
 		log.Fatal(err)
 	}
-	win.Name("+chatgpt")
+	win.Name(fmt.Sprintf("+%s", model))
 	win.Ctl("clean")
 	win.Fprintf("tag", "Get Stop ")
 
@@ -98,15 +110,10 @@ func chat() {
 		default:
 		}
 
-		req := openai.ChatCompletionRequest{
-			Model: model,
-			// Do we need any system messages?
-			Messages: readMessages(),
-		}
-		stream, err := client.CreateChatCompletionStream(ctx, req)
-		//		resp, err := client.CreateChatCompletion(ctx, req)
+		messages := readMessages()
+		stream, err := provider.StreamChat(ctx, messages)
 		if err != nil {
-			log.Printf("openai: %v", err)
+			log.Printf("chat: %v", err)
 			continue
 		}
 
@@ -124,22 +131,23 @@ func chat() {
 		for {
 			select {
 			case <-needstop:
-				// In this case, abort.
 				win.Write("data", []byte("<Stopped by user>"))
 				break Read
 			default:
 			}
-			response, err := stream.Recv()
-			if errors.Is(err, io.EOF) {
+
+			buf := make([]byte, 1024)
+			n, err := stream.Read(buf)
+			if err == io.EOF {
 				win.Write("data", []byte("\n"))
 				break
 			}
 			if err != nil {
-				log.Printf("openai: %v", err)
+				log.Printf("chat: %v", err)
 				break
 			}
 
-			out := strings.Replace(response.Choices[0].Delta.Content, "\n", "\n\t", -1)
+			out := strings.Replace(string(buf[:n]), "\n", "\n\t", -1)
 			win.Write("data", []byte(out))
 		}
 		stream.Close()
@@ -149,7 +157,7 @@ func chat() {
 	}
 }
 
-func readMessages() (messages []openai.ChatCompletionMessage) {
+func readMessages() (messages []Message) {
 	data, _ := win.ReadAll("body")
 	// Segment body by indentation.
 	lines := strings.Split(string(data), "\n")
@@ -157,13 +165,13 @@ func readMessages() (messages []openai.ChatCompletionMessage) {
 		if len(line) == 0 {
 			continue
 		}
-		role := openai.ChatMessageRoleUser
+		role := "user"
 		if line[0] == '\t' {
-			role = openai.ChatMessageRoleAssistant
+			role = "assistant"
 			line = line[1:]
 		}
 		if len(messages) == 0 || messages[len(messages)-1].Role != role {
-			messages = append(messages, openai.ChatCompletionMessage{
+			messages = append(messages, Message{
 				Role: role,
 			})
 		}
