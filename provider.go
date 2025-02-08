@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 
 	genai "github.com/google/generative-ai-go/genai"
 	openai "github.com/sashabaranov/go-openai"
@@ -12,17 +13,23 @@ import (
 )
 
 type openaiProvider struct {
-	client *openai.Client
-	model  string
+	client       *openai.Client
+	model        string
+	systemPrompt string
 }
 
 func (p *openaiProvider) StreamChat(ctx context.Context, messages []Message) (io.ReadCloser, error) {
 	chatMessages := make([]openai.ChatCompletionMessage, len(messages))
-	for i, msg := range messages {
-		chatMessages[i] = openai.ChatCompletionMessage{
+
+	chatMessages = append(chatMessages, openai.ChatCompletionMessage{
+		Role:    "system",
+		Content: p.systemPrompt,
+	})
+	for _, msg := range messages {
+		chatMessages = append(chatMessages, openai.ChatCompletionMessage{
 			Role:    msg.Role,
 			Content: msg.Content,
-		}
+		})
 	}
 
 	req := openai.ChatCompletionRequest{
@@ -111,20 +118,29 @@ func (p *googleProvider) Close() error {
 }
 
 func NewProvider(conf config) (Provider, error) {
+	systemPrompt := conf.SystemPrompt
 	switch conf.Provider {
 	case "openai":
 		return &openaiProvider{
-			client: openai.NewClient(conf.Key),
-			model:  conf.Model,
+			client:       openai.NewClient(conf.Key),
+			model:        conf.Model,
+			systemPrompt: strings.Join(systemPrompt, "\n"),
 		}, nil
 	case "google":
 		client, err := genai.NewClient(ctx, option.WithAPIKey(conf.Key))
 		if err != nil {
 			return nil, fmt.Errorf("NewProvider/google: %w", err)
 		}
+		model := client.GenerativeModel(conf.Model)
+		if systemPrompt != nil {
+			model.SystemInstruction = &genai.Content{
+				Role:  "system",
+				Parts: []genai.Part{genai.Text(strings.Join(systemPrompt, "\n"))},
+			}
+		}
 		return &googleProvider{
 			client: client,
-			model:  client.GenerativeModel(conf.Model),
+			model:  model,
 		}, nil
 	default:
 		return nil, fmt.Errorf("NewProvider: Unknown provider: %s", conf.Provider)

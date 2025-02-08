@@ -27,9 +27,10 @@ type Message struct {
 }
 
 type config struct {
-	Provider string `yaml:"provider"`
-	Key      string `yaml:"key"`
-	Model    string `yaml:"model"`
+	Provider     string   `yaml:"provider"`
+	Key          string   `yaml:"key"`
+	Model        string   `yaml:"model"`
+	SystemPrompt []string `yaml:"system_prompt"`
 }
 
 type Provider interface {
@@ -75,7 +76,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	win.Name(fmt.Sprintf("+%s", model))
+	win.Name("+%s", model)
 	win.Ctl("clean")
 	win.Fprintf("tag", "Get Stop ")
 
